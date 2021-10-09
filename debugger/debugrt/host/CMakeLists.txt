@@ -19,8 +19,9 @@ else ()
   # Note: VS Debugger does not have this requirement. This WinDbg requirement
   # is temporary.
   set_target_properties(
-    oedebugrt PROPERTIES COMPILE_FLAGS "/Zi" # Compile with debug information
-                         LINK_FLAGS "/INCREMENTAL:NO /DEBUG /OPT:REF /OPT:ICF /Guard:CF"
+    oedebugrt
+    PROPERTIES COMPILE_FLAGS "/Zi" # Compile with debug information
+               LINK_FLAGS "/INCREMENTAL:NO /DEBUG /OPT:REF /OPT:ICF /Guard:CF"
   )# Create pdb
   install(FILES $<TARGET_PDB_FILE:oedebugrt>
           DESTINATION ${CMAKE_INSTALL_BINDIR})

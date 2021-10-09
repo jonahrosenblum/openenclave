@@ -17,7 +17,22 @@
 #define STATIC_STACK_SIZE 8 * 100
 #define OE_WORD_SIZE 8
 
-#define CODE_ERET 0x200000000
+#define CODE_EXCEPTION_CONTINUE_EXECUTION 0xFFFFFFFF
+
+/* Assembly code cannot use enum values directly,
+ * define them here to match oe_td_state_t in
+ * internal/sgx/td.h */
+#define TD_STATE_NULL 0
+#define TD_STATE_ENTERED 1
+#define TD_STATE_RUNNING_BLOCKING 2
+#define TD_STATE_RUNNING_NONBLOCKING 3
+#define TD_STATE_FIRST_LEVEL_EXCEPTION_HANDLING 4
+#define TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING 5
+#define TD_STATE_EXITED 6
+
+/* Special signal number that indicates an interupt request
+ * from the host */
+#define SIGUSR1 10
 
 /* Use GS register if this flag is set */
 #ifdef __ASSEMBLER__
@@ -39,6 +54,11 @@
 #define td_host_previous_ecall_context (td_host_ecall_context + 8)
 #define td_exception_handler_stack (td_host_previous_ecall_context + 8)
 #define td_exception_handler_stack_size (td_exception_handler_stack + 8)
+#define td_state (td_exception_handler_stack_size + 8)
+#define td_previous_state (td_state + 8)
+#define td_state_before_exception (td_previous_state + 8)
+#define td_exception_nesting_level (td_state_before_exception + 8)
+#define td_is_interrupted (td_exception_nesting_level + 8)
 
 #define oe_exit_enclave __morestack
 #ifndef __ASSEMBLER__

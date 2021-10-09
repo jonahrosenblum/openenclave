@@ -710,7 +710,7 @@ static void _exit_enclave(uint64_t arg1, uint64_t arg2)
             host_ecall_context->debug_eexit_rip = frame[1];
         }
     }
-    oe_asm_exit(arg1, arg2, td, 0 /* aborting */);
+    oe_asm_exit(arg1, arg2, td, 0 /* direct_return */);
 }
 
 /*

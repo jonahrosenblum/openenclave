@@ -81,7 +81,7 @@ oe_thread_data_t* oe_get_thread_data(void);
  * Due to the inability to use OE_OFFSETOF on a struct while defining its
  * members, this value is computed and hard-coded.
  */
-#define OE_THREAD_SPECIFIC_DATA_SIZE (3724)
+#define OE_THREAD_SPECIFIC_DATA_SIZE (3684)
 
 typedef struct _oe_callsite oe_callsite_t;
 
@@ -91,6 +91,19 @@ typedef struct _oe_tls_atexit
     void (*destructor)(void*);
     void* object;
 } oe_tls_atexit_t;
+
+typedef enum _oe_td_state
+{
+    OE_TD_STATE_NULL = 0,
+    OE_TD_STATE_ENTERED,
+    /* do not allow to take an interrupt request */
+    OE_TD_STATE_RUNNING_BLOCKING,
+    /* allow to take an interrupt request */
+    OE_TD_STATE_RUNNING_NONBLOCKING,
+    OE_TD_STATE_FIRST_LEVEL_EXCEPTION_HANDLING,
+    OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING,
+    OE_TD_STATE_EXITED,
+} oe_td_state_t;
 
 /* This structure manages a pool of shared memory (memory visible to both
  * the enclave and the host). An instance of this structure is maintained
@@ -139,6 +152,22 @@ typedef struct _td
     /* The optional stack area setup by the runtime to handle the exceptions */
     uint64_t exception_handler_stack;
     uint64_t exception_handler_stack_size;
+
+    uint64_t state;
+    /* Hold the previous state upon every exception entries, which is
+     * used to resume the state after an illegal instruction emulation */
+    uint64_t previous_state;
+    /* Hold the previous state upon an exception entry when the nesting
+     * level is zero, which is used to resume the state after the handler
+     * finishes */
+    uint64_t state_before_exception;
+
+    uint64_t exception_nesting_level;
+
+    /* The boolean value set by enter.S when an interrupt request is
+     * accepted and cleared by oe_real_exception_dispatcher() in exception.c
+     * when the value is set and the nesting level is zero */
+    uint64_t is_interrupted;
 
     /* Save the rsp and rbp values in the SSA when the exception handler
      * stack is set */

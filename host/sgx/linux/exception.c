@@ -37,6 +37,7 @@ static void _host_signal_handler(
     host_context.rax = (uint64_t)context->uc_mcontext.gregs[REG_RAX];
     host_context.rbx = (uint64_t)context->uc_mcontext.gregs[REG_RBX];
     host_context.rip = (uint64_t)context->uc_mcontext.gregs[REG_RIP];
+    host_context.signal_number = (uint64_t)sig_num;
 
     // Call platform neutral handler.
     uint64_t action = oe_host_handle_exception(&host_context);
@@ -48,6 +49,11 @@ static void _host_signal_handler(
     }
     else if (g_previous_sigaction[sig_num].sa_handler == SIG_DFL)
     {
+        if (sig_num == SIGUSR1)
+        {
+            // Bypass if the signal is sent to the host
+            return;
+        }
         // If not an enclave exception, and no valid previous signal handler is
         // set, raise it again, and let the default signal handler handle it.
         signal(sig_num, SIG_DFL);
@@ -116,6 +122,7 @@ static void _register_signal_handlers(void)
     sigdelset(&sig_action.sa_mask, SIGILL);
     sigdelset(&sig_action.sa_mask, SIGBUS);
     sigdelset(&sig_action.sa_mask, SIGTRAP);
+    sigdelset(&sig_action.sa_mask, SIGUSR1);
 
     // Set the signal handlers, and store the previous signal action into a
     // global array.
@@ -140,6 +147,11 @@ static void _register_signal_handlers(void)
     }
 
     if (sigaction(SIGTRAP, &sig_action, &g_previous_sigaction[SIGTRAP]) != 0)
+    {
+        abort();
+    }
+
+    if (sigaction(SIGUSR1, &sig_action, &g_previous_sigaction[SIGUSR1]) != 0)
     {
         abort();
     }
