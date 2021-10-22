@@ -9,6 +9,7 @@
 #include <openenclave/internal/tests.h>
 #include "td_state_t.h"
 
+#include <signal.h>
 #include <stdio.h>
 
 #define OE_EXPECT(a, b)                                              \
@@ -28,6 +29,10 @@
             oe_abort();                                              \
         }                                                            \
     } while (0)
+
+bool oe_sgx_register_target_td_host_signal(
+    oe_sgx_td_t* target_td,
+    int signal_number);
 
 typedef struct _thread_info_nonblocking_t
 {
@@ -100,13 +105,21 @@ static uint64_t td_state_handler(oe_exception_record_t* exception_record)
             return OE_EXCEPTION_ABORT_EXECUTION;
         }
 
+        OE_TEST(exception_record->host_signal_number == SIGUSR1);
+
+        // Expect the td->host_signal to be SIGUSR1
+        OE_TEST(_thread_info.td->host_signal == SIGUSR1);
+
         // Expect the state to be OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING
         OE_EXPECT(
             _thread_info.td->state,
             OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING);
 
-        // Expect is_interrupted flag is set
-        OE_TEST(_thread_info.td->is_interrupted == 1);
+        // Expect interrupted flag is set
+        OE_TEST(oe_sgx_td_interrupted(_thread_info.td));
+
+        // Expect the signal is registered
+        OE_TEST(oe_sgx_td_host_signal_registered(_thread_info.td, SIGUSR1));
 
         OE_TEST(exception_record->code == OE_EXCEPTION_UNKNOWN);
 
@@ -120,19 +133,25 @@ static uint64_t td_state_handler(oe_exception_record_t* exception_record)
             _thread_info.td->state,
             OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING);
 
-        _thread_info.td->state = OE_TD_STATE_RUNNING_BLOCKING;
         {
             uint32_t a, b, c, d;
             cpuid(1, 0, &a, &b, &c, &d);
         }
+
+        printf("(tid=%d) thread emulating cpuid...done\n", self_tid);
+
         // Expect the state to be persisted after an illegal instruction
         // emulation
-        OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING_BLOCKING);
+        OE_EXPECT(
+            _thread_info.td->state,
+            OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING);
 
-        // Expect is_interrupted flag is persisted
-        OE_TEST(_thread_info.td->is_interrupted == 1);
+        // Expect interrupted flag is persisted
+        OE_TEST(oe_sgx_td_interrupted(_thread_info.td));
 
         divide_by_zero_exception_function();
+
+        printf("(tid=%d) thread handling div 0...done\n", self_tid);
 
         // Expect the state to be
         // OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING after a nested exception
@@ -140,8 +159,11 @@ static uint64_t td_state_handler(oe_exception_record_t* exception_record)
             _thread_info.td->state,
             OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING);
 
-        // Expect is_interrupted flag is persisted after a nested exception
-        OE_TEST(_thread_info.td->is_interrupted == 1);
+        // Expect interrupted flag is persisted after a nested exception
+        OE_TEST(oe_sgx_td_interrupted(_thread_info.td));
+
+        OE_TEST(
+            oe_sgx_unregister_td_host_signal(_thread_info.td, SIGUSR1) == true);
 
         __atomic_store_n(_host_lock_state, 2, __ATOMIC_RELEASE);
 
@@ -152,9 +174,11 @@ static uint64_t td_state_handler(oe_exception_record_t* exception_record)
     else if (exception_record->code == OE_EXCEPTION_DIVIDE_BY_ZERO)
     {
         int self_tid = 0;
+
         OE_EXPECT(
             _thread_info.td->state,
             OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING);
+
         host_get_tid(&self_tid);
         OE_TEST(_thread_info.tid == self_tid);
 
@@ -177,31 +201,31 @@ void enc_run_thread(int tid)
     int self_tid = 0;
 
     _thread_info.td = oe_sgx_get_td();
-    // Expect the state to be ENTERED upon entering
-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_ENTERED);
 
-    // Expect is_interrupted flag is not set
-    OE_TEST(_thread_info.td->is_interrupted == 0);
+    // Expect the state to be RUNNING upon entering
+    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
 
-    _thread_info.td->state = OE_TD_STATE_RUNNING_BLOCKING;
+    // Expect interrupted flag is not set
+    OE_TEST(!oe_sgx_td_interrupted(_thread_info.td));
+
     host_get_tid(&self_tid);
 
-    // Expect the state to be ENTERED after an ocall
-    // A sophisticated application is responsible to
-    // update the state after the ocall returns
-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_ENTERED);
+    // Expect the state to be RUNNING after an ocall
+    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
 
     OE_TEST(tid == self_tid);
-    printf("(tid=%d) thread is running...\n", self_tid);
     _thread_info.tid = tid;
+
+    printf("(tid=%d) thread is running...\n", _thread_info.tid);
 
     OE_CHECK(oe_add_vectored_exception_handler(false, td_state_handler));
 
-    // Change the state to RUNNING_NONBLOCKING so the thread
-    // can serve an interrupt request
-    _thread_info.td->state = OE_TD_STATE_RUNNING_NONBLOCKING;
+    // Invoke the internal API to unmask the interrupt
+    oe_sgx_td_unmask_interrupt();
+
     // Ensure the order of setting the lock
     asm volatile("" ::: "memory");
+
     __atomic_store_n(_host_lock_state, 1, __ATOMIC_RELEASE);
     while (__atomic_load_n(_host_lock_state, __ATOMIC_ACQUIRE) == 1)
     {
@@ -209,36 +233,45 @@ void enc_run_thread(int tid)
     }
 
     // Expect the state to be persisted after an interrupt
-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING_NONBLOCKING);
+    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
 
-    // Expect is_interrupted flag is cleared
-    OE_TEST(_thread_info.td->is_interrupted == 0);
+    // Expect interrupted flag is cleared
+    OE_TEST(!oe_sgx_td_interrupted(_thread_info.td));
+
+    // Expect td->host_signal is cleared
+    OE_TEST(_thread_info.td->host_signal == 0);
+
+    // Expect the signal is unregistered by the handler
+    OE_TEST(!oe_sgx_td_host_signal_registered(_thread_info.td, SIGUSR1));
 
     printf("(tid=%d) interrupt is handled...\n", self_tid);
 
     __atomic_store_n(_host_lock_state, 3, __ATOMIC_RELEASE);
+
+    // Make a ocall to spin and wait for an interrupt on the host
     host_spin();
+
     while (__atomic_load_n(_host_lock_state, __ATOMIC_ACQUIRE) != 5)
     {
         asm volatile("pause" ::: "memory");
     }
 
-    // Expect the state to be ENTERED after an OCALL
-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_ENTERED);
+    // Expect the state to be RUNNING after an OCALL
+    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
 
-    _thread_info.td->state = OE_TD_STATE_RUNNING_BLOCKING;
     {
         uint32_t a, b, c, d;
         cpuid(1, 0, &a, &b, &c, &d);
     }
+
     // Expect the state to be persisted after an illegal instruction
     // emulation
-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING_BLOCKING);
+    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
 
     divide_by_zero_exception_function();
 
     // Expect the state to be persisted after an exception.
-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING_BLOCKING);
+    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
 
     printf("(tid=%d) thread is exiting...\n", self_tid);
 done:
@@ -250,6 +283,11 @@ void enc_td_state(uint64_t lock_state)
     oe_result_t result;
     int tid = 0;
 
+    {
+        uint32_t a, b, c, d;
+        cpuid(1, 0, &a, &b, &c, &d);
+    }
+
     host_get_tid(&tid);
     OE_TEST(tid != 0);
 
@@ -257,6 +295,7 @@ void enc_td_state(uint64_t lock_state)
     _host_lock_state = (int*)lock_state;
 
     printf("(tid=%d) Create a thread...\n", tid);
+
     result = host_create_thread();
     if (result != OE_OK)
         return;
@@ -269,13 +308,16 @@ void enc_td_state(uint64_t lock_state)
     OE_TEST(_thread_info.tid != 0);
     host_sleep_msec(30);
 
+    OE_TEST(oe_sgx_register_td_host_signal(_thread_info.td, SIGUSR1) == true);
+
     printf(
         "(tid=%d) Sending interrupt to (td=0x%lx, tid=%d) inside the "
         "enclave...\n",
         tid,
         (uint64_t)_thread_info.td,
         _thread_info.tid);
-    host_send_interrupt(_thread_info.tid);
+
+    host_send_interrupt(_thread_info.tid, SIGUSR1);
 
     while (__atomic_load_n(_host_lock_state, __ATOMIC_ACQUIRE) != 4)
     {
@@ -285,6 +327,7 @@ void enc_td_state(uint64_t lock_state)
     // Expect the target td's state to be EXITED while
     // running in the host context
     OE_EXPECT(_thread_info.td->state, OE_TD_STATE_EXITED);
+
     host_sleep_msec(30);
 
     printf(
@@ -293,7 +336,9 @@ void enc_td_state(uint64_t lock_state)
         tid,
         (uint64_t)_thread_info.td,
         _thread_info.tid);
-    host_send_interrupt(_thread_info.tid);
+
+    // Expect the host execution to be interrupted by SIGUSR1
+    host_send_interrupt(_thread_info.tid, SIGUSR1);
 
     host_join_thread();
 

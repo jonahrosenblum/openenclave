@@ -12,7 +12,7 @@ enclave {
     };
 
     untrusted {
-        void host_send_interrupt(int tid);
+        void host_send_interrupt(int tid, int signal_number);
         void host_create_thread();
         void host_join_thread();
         void host_spin();

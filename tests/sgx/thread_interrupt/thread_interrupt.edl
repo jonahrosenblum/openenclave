@@ -14,7 +14,7 @@ enclave {
     };
 
     untrusted {
-        void host_send_interrupt(int tid);
+        void host_send_interrupt(int tid, int signal_number);
         void host_create_thread(uint64_t blocking);
         void host_join_thread();
         int host_get_tid();

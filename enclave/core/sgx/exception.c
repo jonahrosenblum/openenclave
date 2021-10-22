@@ -260,6 +260,11 @@ void oe_real_exception_dispatcher(oe_context_t* oe_context)
     oe_exception_record.faulting_address = td->faulting_address;
     oe_exception_record.error_code = td->error_code;
     oe_exception_record.context = oe_context;
+    /* Only pass the host signal for non-nested exceptions */
+    if (td->exception_nesting_level == 1)
+        oe_exception_record.host_signal_number = (uint16_t)td->host_signal;
+    else
+        oe_exception_record.host_signal_number = 0;
 
     // Refer to oe_enter in host/sgx/enter.c.
     // Restore host_ecall_context from the first EENTER (cssa=0) that allows for
@@ -303,17 +308,29 @@ void oe_real_exception_dispatcher(oe_context_t* oe_context)
     td->error_code = 0;
     td->last_ssa_rsp = 0;
     td->last_ssa_rbp = 0;
-    /* Decrease the nesting level (increased by enter.S) after all
-     * the handlers finish */
-    td->exception_nesting_level--;
+
+    /* Validate and decrease the nesting level (increased by enter.S)
+     * after all the handlers finish */
     if (td->exception_nesting_level == 0)
     {
-        /* Clear the flag after non-nested exception handling is done */
-        if (td->is_interrupted == 1)
-            td->is_interrupted = 0;
-        /* Resume the state using the state_before_exception */
-        td->state = td->state_before_exception;
-        td->state_before_exception = OE_TD_STATE_NULL;
+        oe_abort();
+        return;
+    }
+    td->exception_nesting_level--;
+
+    if (td->exception_nesting_level == 0)
+    {
+        /* Clear the flag if it is set after non-nested exception handling
+         * is done */
+        if (td->interrupted == 1)
+        {
+            td->interrupted = 0;
+        }
+
+        td->host_signal = 0;
+
+        /* Retore the state */
+        td->state = OE_TD_STATE_RUNNING;
     }
     td->previous_state = OE_TD_STATE_NULL;
 
@@ -358,12 +375,12 @@ void oe_virtual_exception_dispatcher(
     uint64_t* arg_out)
 {
     SSA_Info ssa_info = {0};
-    OE_UNUSED(arg_in);
 
     /* Validate the td state, which ensures the function
      * is only invoked by the exception entry code path (see enter.S) */
     if (td->state != OE_TD_STATE_FIRST_LEVEL_EXCEPTION_HANDLING)
     {
+        td->state = OE_TD_STATE_ABORTED;
         *arg_out = OE_EXCEPTION_CONTINUE_SEARCH;
         return;
     }
@@ -374,6 +391,10 @@ void oe_virtual_exception_dispatcher(
         *arg_out = OE_EXCEPTION_CONTINUE_SEARCH;
         return;
     }
+
+    /* Only keep the host signal for non-nested exceptions */
+    if (td->exception_nesting_level == 1)
+        td->host_signal = arg_in;
 
     uint64_t gprsgx_offset = (uint64_t)ssa_info.base_address +
                              ssa_info.frame_byte_size - OE_SGX_GPR_BYTE_SIZE;
@@ -414,8 +435,8 @@ void oe_virtual_exception_dispatcher(
         /* The unknown exception type indicates an interrupt request. Validate
          * the states on the td to ensure that the thread is handling the
          * interrupt */
-        if (td->previous_state != OE_TD_STATE_RUNNING_NONBLOCKING ||
-            td->exception_nesting_level != 1 || td->is_interrupted != 1)
+        if (!oe_sgx_td_host_signal_registered(td, (int)td->host_signal) ||
+            td->exception_nesting_level != 1 || td->interrupted != 1)
         {
             *arg_out = OE_EXCEPTION_CONTINUE_SEARCH;
             return;
@@ -437,8 +458,14 @@ void oe_virtual_exception_dispatcher(
         td->state = td->previous_state;
         td->previous_state = OE_TD_STATE_FIRST_LEVEL_EXCEPTION_HANDLING;
 
-        /* Decrease the nesting level (increased by enter.S) before resuming
-         * the execution */
+        /* Validate and decrease the nesting level (increased by enter.S)
+         * after all the handlers finish */
+        if (td->exception_nesting_level == 0)
+        {
+            td->state = OE_TD_STATE_ABORTED;
+            *arg_out = OE_EXCEPTION_CONTINUE_SEARCH;
+            return;
+        }
         td->exception_nesting_level--;
 
         // Advance RIP to the next instruction for continuation

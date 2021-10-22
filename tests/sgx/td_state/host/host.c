@@ -41,10 +41,10 @@ void host_spin()
     _lock_state = 5;
 }
 
-void host_send_interrupt(int tid)
+void host_send_interrupt(int tid, int signal_number)
 {
     pid_t pid = getpid();
-    syscall(SYS_tgkill, pid, tid, SIGUSR1);
+    syscall(SYS_tgkill, pid, tid, signal_number);
 }
 
 static void* _thread_function()

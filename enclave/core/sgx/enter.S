@@ -50,6 +50,10 @@ oe_enter:
     mov _td_from_tcs_offset(%rip), %r11
     add %rbx, %r11
 
+.check_aborted:
+    cmpq $TD_STATE_ABORTED, td_state(%r11)
+    je .abort
+
     // Get the first ssa address from tcs
     lea OE_SSA_FROM_TCS_BYTE_OFFSET(%rbx), %r10
 
@@ -75,11 +79,12 @@ oe_enter:
     // exception-dispatching-request-check.
     lfence
 
+.update_td_state_on_normal_entry:
     // Do not update the state if the enclave enters in the middle
     // the exception handling (e.g., making an ocall)
-    mov td_state(%r11), %r8
-    cmp $TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING, %r8
+    cmpq $TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING, td_state(%r11)
     je .check_entry_nesting_level
+
     // Update state and clear previous state on normal entries
     movq $TD_STATE_NULL, td_previous_state(%r11)
     movq $TD_STATE_ENTERED, td_state(%r11)
@@ -151,7 +156,7 @@ oe_enter:
     and $-16, %r8
 
     // Proceed without the red zone
-    jmp .check_interrupt_request
+    jmp .state_machine_check
 
 .exception_stack_setup:
     // Stop speculative execution at target of conditional jump
@@ -163,35 +168,74 @@ oe_enter:
     // Start the new stack under the red zone
     sub $ABI_REDZONE_BYTE_SIZE, %r8
 
+.state_machine_check:
+    cmpq $0, td_exception_nesting_level(%r11)
+    jne .state_machine_check_nested_exception
+
+.state_machine_check_non_nested_exception:
+    // Expect the state to be RUNNING on a non-nested exception
+    // entry
+    cmpq $TD_STATE_RUNNING, td_state(%r11)
+    jne .return
+    jmp .check_interrupt_request
+
+.state_machine_check_nested_exception:
+    lfence
+    // Expect the state to be SECOND_LEVEL_EXCEPTION_HANDLING
+    // on a nested exception entry
+    cmpq $TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING, td_state(%r11)
+    jne .return
+
 .check_interrupt_request:
     movq td_state(%r11), %r12
-    // Treat the value SIGUSR1 as a host request to interrupt
-    // the enclave
-    cmp $SIGUSR1, %rsi
-    jne .update_td_state
-    // Only accept the interrupt request if state is RUNNING_NONBLOCKING,
-    // is_interrupted is not set, and exception_nesting_level is zero
-    cmp $TD_STATE_RUNNING_NONBLOCKING, %r12
+
+    // Input value falls in the range of [1, 64] indicates
+    // an interrupt request
+    cmp $0, %rsi
+    je .update_td_state
+    cmp $MAX_SIGNAL_NUMBER, %rsi
+    ja .update_td_state
+
+    // Proceed if the interrupt_unmasked flag is set
+    cmpq $1, td_interrupt_unmasked(%r11)
     jne .return
-    cmpq $1, td_is_interrupted(%r11)
+
+    // Proceed if the corresponding bit of the signal
+    // (i.e., signal number - 1) is set in the bitmask
+    mov td_host_signal_bitmask(%r11), %r13
+    mov %rsi, %r14
+    dec %r14
+    bt %r14, %r13
+    jnc .return
+
+    // Proceed only if the state is RUNNING
+    cmp $TD_STATE_RUNNING, %r12
+    jne .return
+
+    // Proceed if the thread is currently not interrupted
+    cmpq $1, td_interrupted(%r11)
     je .return
+
+    // Proceed if the exception entry is not nested
     cmpq $0, td_exception_nesting_level(%r11)
     jne .return
+
+    lfence
+
     // Set the flag if the request is accepted
-    movq $1, td_is_interrupted(%r11)
+    movq $1, td_interrupted(%r11)
+
+    // Store the host-passed signal number
+    mov %rsi, td_host_signal(%r11)
 
 .update_td_state:
+    lfence
+
     // Keep the state before the exception so that we can restore the
     // state in the illegal instruction emulation flow
     mov %r12, td_previous_state(%r11)
     movq $TD_STATE_FIRST_LEVEL_EXCEPTION_HANDLING, td_state(%r11)
-    // Keep the state before the exception when the nesting level is zero
-    // so that we can restore the state after the handler finishes
-    cmpq $0, td_exception_nesting_level(%r11)
-    jne .skip_update_state_before_exception
-    movq %r12, td_state_before_exception(%r11)
-.skip_update_state_before_exception:
-    lfence
+
     // Increase the nesting level, which will be decreased before resuming
     // the execution (see exception.c)
     incq td_exception_nesting_level(%r11)
@@ -287,15 +331,30 @@ oe_enter:
     xor %rcx, %rcx
     jmp .eexit
 
-.return:
-#define ARG1_CODE_ERET        0x2 // OE_CODE_ERET in oe_code_t
-#define ARG1_CODE_BIT_OFFSET  0x30 // Refer to oe_make_call_arg1 in calls.h
+.abort:
     lfence
 
-    // Set arguments for oe_asm_exit
+    // Set argument 2 for oe_asm_exit
+    mov $CODE_ENCLAVE_ABORTING, %rsi
+
+    // Update the global enclave status
+    mov %rsi, __oe_enclave_status(%rip)
+
+    jmp .prepare_eexit
+
+.return:
+    lfence
+
+    // Set argument 2 for oe_asm_exit
+    mov $CODE_EXCEPTION_CONTINUE_EXECUTION, %rsi
+
+.prepare_eexit:
+#define ARG1_CODE_ERET        0x2 // OE_CODE_ERET in oe_code_t
+#define ARG1_CODE_BIT_OFFSET  0x30 // Refer to oe_make_call_arg1 in calls.h
+
+    // Set argument 1 for oe_asm_exit
     mov $ARG1_CODE_ERET, %rdi
     shl $ARG1_CODE_BIT_OFFSET, %rdi
-    mov $CODE_EXCEPTION_CONTINUE_EXECUTION, %rsi
     mov %r11, %rdx
     mov $1, %rcx // direct_return=1
 

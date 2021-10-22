@@ -126,7 +126,8 @@ oe_asm_exit:
     cmpq $TD_STATE_FIRST_LEVEL_EXCEPTION_HANDLING, td_previous_state(%r11)
     je .execute_eexit
 
-    // Update the state for other scenarios
+    // Update the state to indicate that the enclave is returning
+    // to the host
     movq $TD_STATE_EXITED, td_state(%r11)
 
     oe_cleanup_registers

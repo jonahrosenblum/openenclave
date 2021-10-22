@@ -19,10 +19,10 @@
 oe_enclave_t* enclave;
 static pthread_t _thread;
 
-void host_send_interrupt(int tid)
+void host_send_interrupt(int tid, int signal_number)
 {
     pid_t pid = getpid();
-    syscall(SYS_tgkill, pid, tid, SIGUSR1);
+    syscall(SYS_tgkill, pid, tid, signal_number);
 }
 
 int host_get_tid()

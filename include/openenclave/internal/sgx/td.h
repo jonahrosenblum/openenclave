@@ -81,7 +81,7 @@ oe_thread_data_t* oe_get_thread_data(void);
  * Due to the inability to use OE_OFFSETOF on a struct while defining its
  * members, this value is computed and hard-coded.
  */
-#define OE_THREAD_SPECIFIC_DATA_SIZE (3684)
+#define OE_THREAD_SPECIFIC_DATA_SIZE (3664)
 
 typedef struct _oe_callsite oe_callsite_t;
 
@@ -96,13 +96,11 @@ typedef enum _oe_td_state
 {
     OE_TD_STATE_NULL = 0,
     OE_TD_STATE_ENTERED,
-    /* do not allow to take an interrupt request */
-    OE_TD_STATE_RUNNING_BLOCKING,
-    /* allow to take an interrupt request */
-    OE_TD_STATE_RUNNING_NONBLOCKING,
+    OE_TD_STATE_RUNNING,
     OE_TD_STATE_FIRST_LEVEL_EXCEPTION_HANDLING,
     OE_TD_STATE_SECOND_LEVEL_EXCEPTION_HANDLING,
     OE_TD_STATE_EXITED,
+    OE_TD_STATE_ABORTED,
 } oe_td_state_t;
 
 /* This structure manages a pool of shared memory (memory visible to both
@@ -157,17 +155,27 @@ typedef struct _td
     /* Hold the previous state upon every exception entries, which is
      * used to resume the state after an illegal instruction emulation */
     uint64_t previous_state;
-    /* Hold the previous state upon an exception entry when the nesting
-     * level is zero, which is used to resume the state after the handler
-     * finishes */
-    uint64_t state_before_exception;
 
     uint64_t exception_nesting_level;
+
+    /* The boolean value for opt-in/out the interrupt handling */
+    uint64_t interrupt_unmasked;
 
     /* The boolean value set by enter.S when an interrupt request is
      * accepted and cleared by oe_real_exception_dispatcher() in exception.c
      * when the value is set and the nesting level is zero */
-    uint64_t is_interrupted;
+    uint64_t interrupted;
+
+    /* The signal number passed in by the host during an exception entry.
+     * The acceptable range [1, 64] is based on Linux signal implementation */
+    uint64_t host_signal;
+
+    /* A 64-bit array. Only if a bit is set, the thread will accept the
+     * (host signal number - 1) corresponds to the position of the bit */
+    uint64_t host_signal_bitmask;
+
+    /* Used by the thread-based spinlock */
+    uint32_t lock;
 
     /* Save the rsp and rbp values in the SSA when the exception handler
      * stack is set */
@@ -219,7 +227,24 @@ OE_STATIC_ASSERT(
 /* Get the thread data object for the current thread */
 oe_sgx_td_t* oe_sgx_get_td(void);
 
+/* The following APIs are expected to be used only by the thread itself. */
+
 bool oe_sgx_set_td_exception_handler_stack(void* stack, uint64_t size);
+
+void oe_sgx_td_mask_interrupt();
+
+void oe_sgx_td_unmask_interrupt();
+
+/* The following APIs are expected to be used by both the thread itself
+ * and other threads. */
+
+bool oe_sgx_register_td_host_signal(oe_sgx_td_t* td, int signal_number);
+
+bool oe_sgx_unregister_td_host_signal(oe_sgx_td_t* td, int signal_number);
+
+bool oe_sgx_td_host_signal_registered(oe_sgx_td_t* td, int signal_number);
+
+bool oe_sgx_td_interrupted(oe_sgx_td_t* td);
 
 OE_EXTERNC_END
 
