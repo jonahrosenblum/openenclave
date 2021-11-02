@@ -10,6 +10,7 @@
 #include <openenclave/internal/globals.h>
 #include <openenclave/internal/rdrand.h>
 #include <openenclave/internal/safecrt.h>
+#include <openenclave/internal/thread.h>
 #include <openenclave/internal/utils.h>
 #include "asmdefs.h"
 #include "thread.h"
@@ -195,11 +196,125 @@ bool oe_sgx_set_td_exception_handler_stack(void* stack, uint64_t size)
 /*
 **==============================================================================
 **
+** oe_sgx_td_mask_interrupt()
+** oe_sgx_td_unmask_interrupt()
+**
+**     Internal APIs that allows a thread to self-mask or unmask the interrupts
+**
+**==============================================================================
+*/
+
+OE_INLINE void _set_td_interrupt_unmasked(uint64_t value)
+{
+    oe_sgx_td_t* td = oe_sgx_get_td();
+
+    td->interrupt_unmasked = value;
+}
+
+void oe_sgx_td_mask_interrupt()
+{
+    _set_td_interrupt_unmasked(0);
+}
+
+void oe_sgx_td_unmask_interrupt()
+{
+    _set_td_interrupt_unmasked(1);
+}
+
+/*
+**==============================================================================
+**
+** oe_sgx_register_td_host_signal()
+** oe_sgx_unregister_td_host_signal()
+**
+**     Internal APIs that allows an enclave to register or unregister signals
+**     raised by the host for itself or a target thread
+**
+**==============================================================================
+*/
+
+OE_INLINE bool _set_td_host_signal_bitmask(
+    oe_sgx_td_t* td,
+    int signal_number,
+    bool set_bit)
+{
+    if (!td)
+        return false;
+
+    /* only allow number 1-64 */
+    if (signal_number <= 0 || signal_number > 64)
+        return false;
+
+    oe_spin_lock(&td->lock);
+
+    if (set_bit)
+        td->host_signal_bitmask |= 1UL << (signal_number - 1);
+    else
+        td->host_signal_bitmask &= ~(1UL << (signal_number - 1));
+
+    oe_spin_unlock(&td->lock);
+
+    return true;
+}
+
+bool oe_sgx_register_td_host_signal(oe_sgx_td_t* td, int signal_number)
+{
+    return _set_td_host_signal_bitmask(td, signal_number, 1 /* set */);
+}
+
+bool oe_sgx_unregister_td_host_signal(oe_sgx_td_t* td, int signal_number)
+{
+    return _set_td_host_signal_bitmask(td, signal_number, 0 /* clear */);
+}
+
+/*
+**==============================================================================
+**
+** oe_sgx_td_host_signal_registered
+**
+**     Internal API for querying whether the thread registers the given
+**     host signal
+**
+**==============================================================================
+*/
+bool oe_sgx_td_host_signal_registered(oe_sgx_td_t* td, int signal_number)
+{
+    if (!td)
+        return false;
+
+    /* only allow number 1-64 */
+    if (signal_number <= 0 || signal_number > 64)
+        return false;
+
+    return (td->host_signal_bitmask & (1UL << (signal_number - 1))) != 0;
+}
+
+/*
+**==============================================================================
+**
+** oe_sgx_td_is_interrupted()
+**
+**     Internal API for querying whether the thread is interrupted
+**
+**==============================================================================
+*/
+
+bool oe_sgx_td_interrupted(oe_sgx_td_t* td)
+{
+    if (!td)
+        return false;
+
+    return td->interrupted;
+}
+
+/*
+**==============================================================================
+**
 ** td_initialized()
 **
 **     Returns TRUE if this thread data structure (oe_sgx_td_t) is initialized.
-*An
-**     initialized oe_sgx_td_t meets the following conditions:
+**
+**     An initialized oe_sgx_td_t meets the following conditions:
 **
 **         (1) td is not null
 **         (2) td->base.self_addr == td
